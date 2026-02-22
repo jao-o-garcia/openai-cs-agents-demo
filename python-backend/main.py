@@ -9,6 +9,9 @@ from fastapi import Depends, FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 
+from dotenv import load_dotenv
+load_dotenv()
+
 from airline.agents import (
     booking_cancellation_agent,
     faq_agent,
@@ -50,12 +53,52 @@ def get_server() -> AirlineServer:
 async def chatkit_endpoint(
     request: Request, server: AirlineServer = Depends(get_server)
 ) -> Response:
+    # Log incoming payload
     payload = await request.body()
+    print("=== INCOMING PAYLOAD ===")
+    print(payload.decode('utf-8'))
+    print("=== END PAYLOAD ===")
     result = await server.process(payload, {"request": request})
+    # Log response
+    print("\n" + "="*60)
+    print("📤 OUTGOING RESPONSE:")
+    print("="*60)
     if isinstance(result, StreamingResult):
-        return StreamingResponse(result, media_type="text/event-stream")
+        print("Type: Streaming Response (SSE)")
+        # Wrap the stream to log each chunk
+        async def logged_stream():
+            async for chunk in result:
+                text = chunk.decode('utf-8') if isinstance(chunk, bytes) else chunk
+                
+                for line in text.splitlines():
+                    line = line.strip()
+                    if not line.startswith("data:"):
+                        continue
+                    data_str = line.removeprefix("data:").strip()
+                    if not data_str or data_str == "[DONE]":
+                        continue
+                    try:
+                        payload = json.loads(data_str)
+                        if payload.get("name") == "runner_event_delta":
+                            events = payload.get("data", {}).get("events", [])
+                            for event in events:
+                                if event.get("type") == "message":
+                                    content = event.get("content", "")
+                                    if content:
+                                        print(content, end="", flush=True)
+                    except json.JSONDecodeError as e:
+                        print(f"[PARSE ERROR]: {e}", flush=True)
+                
+                yield chunk
+            print()
+        return StreamingResponse(logged_stream(), media_type="text/event-stream")
+
     if hasattr(result, "json"):
+        print(result.json)
+        print("="*60 + "\n")
         return Response(content=result.json, media_type="application/json")
+    print(result)
+    print("="*60 + "\n")
     return Response(content=result)
 
 

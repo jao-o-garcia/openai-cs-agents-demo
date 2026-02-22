@@ -29,6 +29,7 @@ You can also follow [these instructions](https://platform.openai.com/docs/librar
 Alternatively, you can set the `OPENAI_API_KEY` environment variable in an `.env` file at the root of the `python-backend` folder. You will need to install the `python-dotenv` package to load the environment variables from the `.env` file. And then, add these lines of code to your app:
 
 ```bash
+## Place this on top of your main.py (where your api server is)
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -40,14 +41,14 @@ Install the dependencies for the backend by running the following commands:
 
 ```bash
 cd python-backend
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+uv init
+uv add openai-agents openai-chatkit pydantic fastapi uvicorn python-dotenv
 ```
 
 For the UI, you can run:
 
 ```bash
+## If you are currently in python-backend, go back by using `cd ..`
 cd ui
 npm install
 ```
@@ -61,7 +62,7 @@ You can either run the backend independently if you want to use a separate UI, o
 From the `python-backend` folder, run:
 
 ```bash
-python -m uvicorn main:app --reload --port 8000
+uv run uvicorn main:app --reload --port 8000
 ```
 
 The backend will be available at: [http://localhost:8000](http://localhost:8000)
@@ -77,6 +78,128 @@ npm run dev
 The frontend will be available at: [http://localhost:3000](http://localhost:3000)
 
 This command will also start the backend.
+
+## IMPORTANT:
+This app is forked and edited. @app.post("/chatkit") contains print statements that can be used for checking the structure of the payload. This can also for confirming agent response. 
+
+```
+Incoming initial payload (First thread example)
+{"type":"threads.create","params":{"input":{"content":[{"type":"input_text","text":"Hi there"}],"quoted_text":"","attachments":[],"inference_options":{}}}}
+
+Incoming initial payload (Next thread example)
+# You can double check the thread_id here
+{"type":"threads.add_user_message","params":{"input":{"content":[{"type":"input_text","text":"What can you do"}],"quoted_text":"","attachments":[],"inference_options":{}},"thread_id":"thr_dd2e456b”}}
+```
+
+Print the outgoing response:
+The original code was:
+```python
+if isinstance(result, StreamingResult):
+```
+and was changed to:
+```python
+if isinstance(result, StreamingResult):
+        print("Type: Streaming Response (SSE)")
+        # Wrap the stream to log each chunk
+        async def logged_stream():
+            async for chunk in result:
+                text = chunk.decode('utf-8') if isinstance(chunk, bytes) else chunk
+                
+                for line in text.splitlines():
+                    line = line.strip()
+                    if not line.startswith("data:"):
+                        continue
+                    data_str = line.removeprefix("data:").strip()
+                    if not data_str or data_str == "[DONE]":
+                        continue
+                    try:
+                        payload = json.loads(data_str)
+                        if payload.get("name") == "runner_event_delta":
+                            events = payload.get("data", {}).get("events", [])
+                            for event in events:
+                                if event.get("type") == "message":
+                                    content = event.get("content", "")
+                                    if content:
+                                        print(content, end="", flush=True)
+                    except json.JSONDecodeError as e:
+                        print(f"[PARSE ERROR]: {e}", flush=True)
+                
+                yield chunk
+            print()
+        return StreamingResponse(logged_stream(), media_type="text/event-stream")
+```
+IMPORTANT! - DO NOT UPLOAD these into production. This is only ok for viewing or checking if your backend worked correctly (without running the front end)
+
+Here is the full code for the `/chatkit`:
+```python
+@app.post("/chatkit")
+async def chatkit_endpoint(
+    request: Request, server: AirlineServer = Depends(get_server)
+) -> Response:
+    # Log incoming payload
+    payload = await request.body()
+    print("=== INCOMING PAYLOAD ===")
+    print(payload.decode('utf-8'))
+    print("=== END PAYLOAD ===")
+    result = await server.process(payload, {"request": request})
+    # Log response
+    print("\n" + "="*60)
+    print("📤 OUTGOING RESPONSE:")
+    print("="*60)
+    if isinstance(result, StreamingResult):
+        print("Type: Streaming Response (SSE)")
+        # Wrap the stream to log each chunk
+        async def logged_stream():
+            async for chunk in result:
+                text = chunk.decode('utf-8') if isinstance(chunk, bytes) else chunk
+                
+                for line in text.splitlines():
+                    line = line.strip()
+                    if not line.startswith("data:"):
+                        continue
+                    data_str = line.removeprefix("data:").strip()
+                    if not data_str or data_str == "[DONE]":
+                        continue
+                    try:
+                        payload = json.loads(data_str)
+                        if payload.get("name") == "runner_event_delta":
+                            events = payload.get("data", {}).get("events", [])
+                            for event in events:
+                                if event.get("type") == "message":
+                                    content = event.get("content", "")
+                                    if content:
+                                        print(content, end="", flush=True)
+                    except json.JSONDecodeError as e:
+                        print(f"[PARSE ERROR]: {e}", flush=True)
+                
+                yield chunk
+            print()
+        return StreamingResponse(logged_stream(), media_type="text/event-stream")
+
+    if hasattr(result, "json"):
+        print(result.json)
+        print("="*60 + "\n")
+        return Response(content=result.json, media_type="application/json")
+    print(result)
+    print("="*60 + "\n")
+    return Response(content=result)
+```
+
+## Test your backend
+Initial message
+```
+curl -X POST http://localhost:8000/chatkit \
+  -H "Content-Type: application/json" \
+  -d '{"type":"threads.create","params":{"input":{"content":[{"type":"input_text","text":"Hi there my name is Pikachu"}],"quoted_text":"","attachments":[],"inference_options":{}}}}'
+```
+Second message.
+Grab the `thread_id` from the earlier response, then paste its value in `thread_id`
+```
+curl -X POST http://localhost:8000/chatkit \
+  -H "Content-Type: application/json" \
+  -d '{"type":"threads.add_user_message","params":{"input":{"content":[{"type":"input_text","text":"What can you did I just say? if you reallly remembered?"}],"quoted_text":"","attachments":[],"inference_options":{}},"thread_id":"thr_57d00167"}}'
+```
+It should be able to say what is the first message, prove that it can refer to the same thread
 
 ## Customization
 
